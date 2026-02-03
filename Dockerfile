@@ -13,6 +13,9 @@ COPY tsconfig.json ./
 # Install dependencies (ignore postinstall script that tries to install client deps)
 RUN npm install --ignore-scripts
 
+# Rebuild better-sqlite3 for the container's architecture
+RUN npm rebuild better-sqlite3
+
 # Copy source code
 COPY src ./src
 

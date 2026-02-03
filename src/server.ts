@@ -16,12 +16,24 @@ import { pino } from 'pino';
 import { Boom } from '@hapi/boom';
 import { WhatsAppTracker, ProbeMethod } from './tracker.js';
 import { SignalTracker, getSignalAccounts, checkSignalNumber } from './signal-tracker.js';
+import { ActivityDatabase, Platform } from './database.js';
 
 // Configuration
 const SIGNAL_API_URL = process.env.SIGNAL_API_URL || 'http://localhost:8080';
 
+// Initialize database (lazy - after server starts)
+let activityDb: ActivityDatabase;
+function getDb() {
+    if (!activityDb) {
+        activityDb = new ActivityDatabase();
+        console.log('[DATABASE] Activity database initialized');
+    }
+    return activityDb;
+}
+
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -37,9 +49,6 @@ let isSignalConnected = false;
 let signalAccountNumber: string | null = null;
 let globalProbeMethod: ProbeMethod = 'delete'; // Default to delete method
 let currentWhatsAppQr: string | null = null; // Store current QR code for new clients
-
-// Platform type for contacts
-type Platform = 'whatsapp' | 'signal';
 
 interface TrackerEntry {
     tracker: WhatsAppTracker | SignalTracker;
@@ -80,6 +89,8 @@ async function connectToWhatsApp() {
             currentWhatsAppQr = null; // Clear QR on successful connection
             console.log('opened connection');
             io.emit('connection-open');
+            // Resume tracking for WhatsApp contacts
+            setTimeout(() => resumeTracking(), 2000);
         }
     });
 
@@ -142,6 +153,8 @@ async function checkSignalConnection() {
                 signalLinkingInProgress = false;
                 console.log(`[SIGNAL] Connected with account: ${signalAccountNumber}`);
                 io.emit('signal-connection-open', { number: signalAccountNumber });
+                // Resume tracking for Signal contacts
+                setTimeout(() => resumeTracking(), 2000);
             }
         } else {
             if (isSignalConnected) {
@@ -225,6 +238,174 @@ async function pollSignalLinkingStatus() {
 // Check Signal connection periodically
 checkSignalConnection();
 setInterval(checkSignalConnection, 5000);
+
+// Resume tracking for contacts that were being tracked before restart
+async function resumeTracking() {
+    const activeContacts = getDb().getActiveContacts();
+    console.log(`[RESUME] Found ${activeContacts.length} contacts to resume tracking`);
+
+    for (const contact of activeContacts) {
+        // Skip if already tracking
+        if (trackers.has(contact.jid)) {
+            console.log(`[RESUME] Already tracking ${contact.jid}, skipping`);
+            continue;
+        }
+
+        if (contact.platform === 'whatsapp') {
+            if (!isWhatsAppConnected || !sock) {
+                console.log(`[RESUME] WhatsApp not connected, cannot resume ${contact.jid}`);
+                continue;
+            }
+
+            try {
+                console.log(`[RESUME] Resuming WhatsApp tracking for ${contact.jid}`);
+                const tracker = new WhatsAppTracker(sock, contact.jid);
+                tracker.setProbeMethod(globalProbeMethod);
+                trackers.set(contact.jid, { tracker, platform: 'whatsapp' });
+
+                tracker.onUpdate = (updateData) => {
+                    io.emit('tracker-update', {
+                        jid: contact.jid,
+                        platform: 'whatsapp',
+                        ...updateData
+                    });
+                };
+
+                tracker.onStateChange = (jid, prevState, newState, rtt, avgRtt) => {
+                    console.log(`[STATE CHANGE] WhatsApp ${jid}: ${prevState} -> ${newState}`);
+                    getDb().logStateChange(jid, 'whatsapp', prevState, newState, rtt, avgRtt);
+                    io.emit('state-change', {
+                        jid,
+                        platform: 'whatsapp',
+                        previousState: prevState,
+                        newState,
+                        rtt,
+                        avgRtt,
+                        timestamp: Date.now()
+                    });
+                };
+
+                tracker.onRttMeasurement = (jid, rtt, avgRtt, median, threshold, state) => {
+                    getDb().logRttMeasurement(jid, 'whatsapp', rtt, avgRtt, median, threshold, state);
+                };
+
+                tracker.startTracking();
+
+                // Update profile pic
+                const ppUrl = await tracker.getProfilePicture();
+                if (ppUrl) {
+                    getDb().updateProfilePic(contact.jid, ppUrl);
+                }
+                io.emit('profile-pic', { jid: contact.jid, url: ppUrl || contact.profilePicUrl });
+                io.emit('contact-name', { jid: contact.jid, name: contact.displayName || contact.jid.split('@')[0] });
+
+                console.log(`[RESUME] Successfully resumed tracking ${contact.jid}`);
+            } catch (err) {
+                console.error(`[RESUME] Failed to resume WhatsApp tracking for ${contact.jid}:`, err);
+            }
+        } else if (contact.platform === 'signal') {
+            if (!isSignalConnected || !signalAccountNumber) {
+                console.log(`[RESUME] Signal not connected, cannot resume ${contact.jid}`);
+                continue;
+            }
+
+            try {
+                // Extract number from signal:XXXXXXXXXX format
+                const targetNumber = contact.jid.replace('signal:', '');
+                const formattedNumber = targetNumber.startsWith('+') ? targetNumber : `+${targetNumber}`;
+
+                console.log(`[RESUME] Resuming Signal tracking for ${contact.jid}`);
+                const tracker = new SignalTracker(SIGNAL_API_URL, signalAccountNumber, formattedNumber);
+
+                trackers.set(contact.jid, { tracker, platform: 'signal' });
+
+                tracker.onUpdate = (updateData) => {
+                    io.emit('tracker-update', {
+                        jid: contact.jid,
+                        platform: 'signal',
+                        ...updateData
+                    });
+                };
+
+                tracker.onStateChange = (identifier, prevState, newState, rtt, avgRtt) => {
+                    console.log(`[STATE CHANGE] Signal ${identifier}: ${prevState} -> ${newState}`);
+                    getDb().logStateChange(contact.jid, 'signal', prevState, newState, rtt, avgRtt);
+                    io.emit('state-change', {
+                        jid: contact.jid,
+                        platform: 'signal',
+                        previousState: prevState,
+                        newState,
+                        rtt,
+                        avgRtt,
+                        timestamp: Date.now()
+                    });
+                };
+
+                tracker.onRttMeasurement = (identifier, rtt, avgRtt, median, threshold, state) => {
+                    getDb().logRttMeasurement(contact.jid, 'signal', rtt, avgRtt, median, threshold, state);
+                };
+
+                tracker.startTracking();
+                io.emit('contact-name', { jid: contact.jid, name: contact.displayName || targetNumber });
+
+                console.log(`[RESUME] Successfully resumed tracking ${contact.jid}`);
+            } catch (err) {
+                console.error(`[RESUME] Failed to resume Signal tracking for ${contact.jid}:`, err);
+            }
+        }
+    }
+}
+
+// REST API endpoints for activity history
+
+// Get state history for a contact
+app.get('/api/contacts/:jid/history', (req, res) => {
+    const { jid } = req.params;
+    const from = req.query.from ? parseInt(req.query.from as string) : undefined;
+    const to = req.query.to ? parseInt(req.query.to as string) : undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : 1000;
+
+    const history = getDb().getStateHistory(jid, from, to, limit);
+    res.json(history);
+});
+
+// Get daily timeline for a contact
+app.get('/api/contacts/:jid/timeline', (req, res) => {
+    const { jid } = req.params;
+    const date = req.query.date as string || new Date().toISOString().split('T')[0];
+
+    const timeline = getDb().getDailyTimeline(jid, date);
+    res.json(timeline);
+});
+
+// Get activity stats for a contact
+app.get('/api/contacts/:jid/stats', (req, res) => {
+    const { jid } = req.params;
+    const period = (req.query.period as 'day' | 'week' | 'month') || 'day';
+
+    if (!['day', 'week', 'month'].includes(period)) {
+        res.status(400).json({ error: 'Invalid period. Use: day, week, or month' });
+        return;
+    }
+
+    const stats = getDb().getActivityStats(jid, period);
+    res.json(stats);
+});
+
+// Get all contacts from database
+app.get('/api/contacts', (_req, res) => {
+    const contacts = getDb().getAllContacts();
+    res.json(contacts);
+});
+
+// Get RTT history for a contact (chart data)
+app.get('/api/contacts/:jid/rtt', (req, res) => {
+    const { jid } = req.params;
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : 500;
+
+    const history = getDb().getRttHistory(jid, limit);
+    res.json(history);
+});
 
 io.on('connection', (socket) => {
     console.log('Client connected');
@@ -320,6 +501,28 @@ io.on('connection', (socket) => {
                     });
                 };
 
+                tracker.onStateChange = (identifier, prevState, newState, rtt, avgRtt) => {
+                    console.log(`[STATE CHANGE] Signal ${identifier}: ${prevState} -> ${newState}`);
+                    getDb().logStateChange(signalId, 'signal', prevState, newState, rtt, avgRtt);
+                    io.emit('state-change', {
+                        jid: signalId,
+                        platform: 'signal',
+                        previousState: prevState,
+                        newState,
+                        rtt,
+                        avgRtt,
+                        timestamp: Date.now()
+                    });
+                };
+
+                tracker.onRttMeasurement = (identifier, rtt, avgRtt, median, threshold, state) => {
+                    getDb().logRttMeasurement(signalId, 'signal', rtt, avgRtt, median, threshold, state);
+                };
+
+                // Mark contact as tracking in database
+                getDb().getOrCreateContact(signalId, 'signal', cleanNumber);
+                getDb().setTrackingStatus(signalId, true);
+
                 tracker.startTracking();
 
                 socket.emit('contact-added', {
@@ -359,9 +562,33 @@ io.on('connection', (socket) => {
                         });
                     };
 
+                    tracker.onStateChange = (jid, prevState, newState, rtt, avgRtt) => {
+                        console.log(`[STATE CHANGE] WhatsApp ${jid}: ${prevState} -> ${newState}`);
+                        getDb().logStateChange(jid, 'whatsapp', prevState, newState, rtt, avgRtt);
+                        io.emit('state-change', {
+                            jid,
+                            platform: 'whatsapp',
+                            previousState: prevState,
+                            newState,
+                            rtt,
+                            avgRtt,
+                            timestamp: Date.now()
+                        });
+                    };
+
+                    tracker.onRttMeasurement = (jid, rtt, avgRtt, median, threshold, state) => {
+                        getDb().logRttMeasurement(jid, 'whatsapp', rtt, avgRtt, median, threshold, state);
+                    };
+
+                    // Mark contact as tracking in database
+                    getDb().getOrCreateContact(result.jid, 'whatsapp', cleanNumber);
+                    getDb().setTrackingStatus(result.jid, true);
+
                     tracker.startTracking();
 
                     const ppUrl = await tracker.getProfilePicture();
+                    // Store profile pic URL in database
+                    getDb().updateProfilePic(result.jid, ppUrl || null);
 
                     let contactName = cleanNumber;
                     try {
@@ -397,6 +624,8 @@ io.on('connection', (socket) => {
         if (entry) {
             entry.tracker.stopTracking();
             trackers.delete(jid);
+            // Mark as not tracking in database
+            getDb().setTrackingStatus(jid, false);
             socket.emit('contact-removed', jid);
         }
     });

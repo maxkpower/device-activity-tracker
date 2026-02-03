@@ -109,21 +109,21 @@ function App() {
     }, []);
 
     return (
-        <div className="min-h-screen bg-gray-100 p-8">
+        <div className="min-h-screen bg-dark-950 p-8">
             <div className="max-w-6xl mx-auto">
-                <header className="mb-8 flex justify-between items-center">
-                    <h1 className="text-3xl font-bold text-gray-900">Activity Tracker</h1>
+                <header className="mb-8 flex justify-between items-center bg-dark-900 p-4 rounded-lg border border-dark-700">
+                    <h1 className="text-2xl font-bold text-gray-100">Activity Tracker</h1>
                     <div className="flex items-center gap-2">
-                        <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-                        <span className="text-sm text-gray-600">{isConnected ? 'Server Connected' : 'Disconnected'}</span>
+                        <div className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-accent-green' : 'bg-accent-red'}`} />
+                        <span className="text-sm text-gray-400">{isConnected ? 'Server Connected' : 'Disconnected'}</span>
                         {isConnected && (
                             <>
-                                <div className="w-px h-4 bg-gray-300 mx-2" />
-                                <div className={`w-3 h-3 rounded-full ${connectionState.whatsapp ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                                <span className="text-sm text-gray-600">WhatsApp</span>
-                                <div className="w-px h-4 bg-gray-300 mx-2" />
-                                <div className={`w-3 h-3 rounded-full ${connectionState.signal ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                                <span className="text-sm text-gray-600">Signal</span>
+                                <div className="w-px h-4 bg-dark-700 mx-2" />
+                                <div className={`w-2.5 h-2.5 rounded-full ${connectionState.whatsapp ? 'bg-accent-green' : 'bg-gray-600'}`} />
+                                <span className="text-sm text-gray-400">WhatsApp</span>
+                                <div className="w-px h-4 bg-dark-700 mx-2" />
+                                <div className={`w-2.5 h-2.5 rounded-full ${connectionState.signal ? 'bg-accent-blue' : 'bg-gray-600'}`} />
+                                <span className="text-sm text-gray-400">Signal</span>
                             </>
                         )}
                     </div>

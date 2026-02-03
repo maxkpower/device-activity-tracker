@@ -70,7 +70,10 @@ export class SignalTracker {
     private probeMethod: ProbeMethod = 'reaction';
     private ws: WebSocket | null = null;
     private reconnectTimeout: NodeJS.Timeout | null = null;
+    private previousStates: Map<string, string> = new Map(); // Track previous states for change detection
     public onUpdate?: (data: any) => void;
+    public onStateChange?: (identifier: string, prevState: string | null, newState: string, rtt?: number, avgRtt?: number) => void;
+    public onRttMeasurement?: (identifier: string, rtt: number, avgRtt: number, median: number, threshold: number, state: string) => void;
 
     // Serialized probe tracking (per Codex recommendation)
     // Only ONE probe in flight at a time - correlate by order, not timestamp
@@ -336,19 +339,30 @@ export class SignalTracker {
     }
 
     private markDeviceOffline(identifier: string, timeout: number) {
+        const prevState = this.previousStates.get(identifier) || null;
+        const newState = 'OFFLINE';
+
         if (!this.deviceMetrics.has(identifier)) {
             this.deviceMetrics.set(identifier, {
                 rttHistory: [],
                 recentRtts: [],
-                state: 'OFFLINE',
+                state: newState,
                 lastRtt: timeout,
                 lastUpdate: Date.now()
             });
         } else {
             const metrics = this.deviceMetrics.get(identifier)!;
-            metrics.state = 'OFFLINE';
+            metrics.state = newState;
             metrics.lastRtt = timeout;
             metrics.lastUpdate = Date.now();
+        }
+
+        // Emit state change if state actually changed
+        if (prevState !== newState) {
+            this.previousStates.set(identifier, newState);
+            if (this.onStateChange) {
+                this.onStateChange(identifier, prevState, newState, timeout, undefined);
+            }
         }
 
         logger.info(`Device ${identifier} marked as OFFLINE (no receipt after ${timeout}ms)`);
@@ -397,6 +411,8 @@ export class SignalTracker {
         const metrics = this.deviceMetrics.get(identifier);
         if (!metrics) return;
 
+        const prevState = this.previousStates.get(identifier) || null;
+
         if (metrics.state === 'OFFLINE') {
             if (metrics.lastRtt <= 5000 && metrics.recentRtts.length > 0) {
                 logger.debug(`Device ${identifier} came back online (RTT: ${metrics.lastRtt}ms)`);
@@ -409,6 +425,7 @@ export class SignalTracker {
 
         let median = 0;
         let threshold = 0;
+        let newState = metrics.state;
 
         if (this.globalRttHistory.length >= 3) {
             const sorted = [...this.globalRttHistory].sort((a, b) => a - b);
@@ -417,16 +434,31 @@ export class SignalTracker {
             threshold = median * 0.9;
 
             if (movingAvg < threshold) {
-                metrics.state = 'Online';
+                newState = 'Online';
             } else {
-                metrics.state = 'Standby';
+                newState = 'Standby';
             }
         } else {
-            metrics.state = 'Calibrating...';
+            newState = 'Calibrating...';
         }
 
-        const stateColor = metrics.state === 'Online' ? '🟢' : metrics.state === 'Standby' ? '🟡' : '⚪';
-        logger.info(`${stateColor} ${identifier}: ${metrics.state} (RTT: ${metrics.lastRtt}ms, Avg: ${movingAvg.toFixed(0)}ms)`);
+        metrics.state = newState;
+
+        // Emit state change if state actually changed
+        if (prevState !== newState) {
+            this.previousStates.set(identifier, newState);
+            if (this.onStateChange) {
+                this.onStateChange(identifier, prevState, newState, metrics.lastRtt, movingAvg);
+            }
+        }
+
+        // Emit RTT measurement for persistence
+        if (this.onRttMeasurement) {
+            this.onRttMeasurement(identifier, metrics.lastRtt, movingAvg, median, threshold, newState);
+        }
+
+        const stateColor = newState === 'Online' ? '🟢' : newState === 'Standby' ? '🟡' : '⚪';
+        logger.info(`${stateColor} ${identifier}: ${newState} (RTT: ${metrics.lastRtt}ms, Avg: ${movingAvg.toFixed(0)}ms)`);
     }
 
     private sendUpdate() {

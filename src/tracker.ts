@@ -104,7 +104,10 @@ export class WhatsAppTracker {
     private probeTimeouts: Map<string, NodeJS.Timeout> = new Map();
     private lastPresence: string | null = null;
     private probeMethod: ProbeMethod = 'delete'; // Default to delete method
+    private previousStates: Map<string, string> = new Map(); // Track previous states for change detection
     public onUpdate?: (data: any) => void;
+    public onStateChange?: (jid: string, prevState: string | null, newState: string, rtt?: number, avgRtt?: number) => void;
+    public onRttMeasurement?: (jid: string, rtt: number, avgRtt: number, median: number, threshold: number, state: string) => void;
 
     constructor(sock: WASocket, targetJid: string, debugMode: boolean = false) {
         this.sock = sock;
@@ -425,20 +428,31 @@ export class WhatsAppTracker {
      * @param timeout Time elapsed before timeout
      */
     private markDeviceOffline(jid: string, timeout: number) {
+        const prevState = this.previousStates.get(jid) || null;
+        const newState = 'OFFLINE';
+
         // Initialize device metrics if not exists
         if (!this.deviceMetrics.has(jid)) {
             this.deviceMetrics.set(jid, {
                 rttHistory: [],
                 recentRtts: [],
-                state: 'OFFLINE',
+                state: newState,
                 lastRtt: timeout,
                 lastUpdate: Date.now()
             });
         } else {
             const metrics = this.deviceMetrics.get(jid)!;
-            metrics.state = 'OFFLINE';
+            metrics.state = newState;
             metrics.lastRtt = timeout;
             metrics.lastUpdate = Date.now();
+        }
+
+        // Emit state change if state actually changed
+        if (prevState !== newState) {
+            this.previousStates.set(jid, newState);
+            if (this.onStateChange) {
+                this.onStateChange(this.targetJid, prevState, newState, timeout, undefined);
+            }
         }
 
         trackerLogger.info(`\n🔴 Device ${jid} marked as OFFLINE (no CLIENT ACK after ${timeout}ms)\n`);
@@ -503,6 +517,8 @@ export class WhatsAppTracker {
         const metrics = this.deviceMetrics.get(jid);
         if (!metrics) return;
 
+        const prevState = this.previousStates.get(jid) || null;
+
         // If device is marked as OFFLINE (no CLIENT ACK received), keep that state
         // Only change back to Online/Standby if we receive new measurements
         if (metrics.state === 'OFFLINE') {
@@ -522,6 +538,7 @@ export class WhatsAppTracker {
         // Calculate global median and threshold
         let median = 0;
         let threshold = 0;
+        let newState = metrics.state;
 
         if (this.globalRttHistory.length >= 3) {
             const sorted = [...this.globalRttHistory].sort((a, b) => a - b);
@@ -532,12 +549,27 @@ export class WhatsAppTracker {
             threshold = median * 0.9;
 
             if (movingAvg < threshold) {
-                metrics.state = 'Online';
+                newState = 'Online';
             } else {
-                metrics.state = 'Standby';
+                newState = 'Standby';
             }
         } else {
-            metrics.state = 'Calibrating...';
+            newState = 'Calibrating...';
+        }
+
+        metrics.state = newState;
+
+        // Emit state change if state actually changed
+        if (prevState !== newState) {
+            this.previousStates.set(jid, newState);
+            if (this.onStateChange) {
+                this.onStateChange(this.targetJid, prevState, newState, metrics.lastRtt, movingAvg);
+            }
+        }
+
+        // Emit RTT measurement for persistence
+        if (this.onRttMeasurement) {
+            this.onRttMeasurement(this.targetJid, metrics.lastRtt, movingAvg, median, threshold, newState);
         }
 
         // Normal mode: Formatted output

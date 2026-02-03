@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {Eye, EyeOff, Plus, Trash2, Zap, MessageCircle, Settings} from 'lucide-react';
 import { socket, Platform, ConnectionState } from '../App';
 import { ContactCard } from './ContactCard';
 import { Login } from './Login';
+import { getRttHistory } from '../services/api';
 
 type ProbeMethod = 'delete' | 'reaction';
 
@@ -48,6 +49,35 @@ export function Dashboard({ connectionState }: DashboardProps) {
     const [privacyMode, setPrivacyMode] = useState(false);
     const [probeMethod, setProbeMethod] = useState<ProbeMethod>('delete');
     const [showConnections, setShowConnections] = useState(false);
+
+    // Load historical RTT data for a contact
+    const loadHistoricalData = useCallback(async (jid: string) => {
+        try {
+            const history = await getRttHistory(jid, 500);
+            if (history.length > 0) {
+                const chartData: TrackerData[] = history.map(m => ({
+                    rtt: m.rtt,
+                    avg: m.avgRtt || m.rtt,
+                    median: m.median || 0,
+                    threshold: m.threshold || 0,
+                    state: m.state || 'Unknown',
+                    timestamp: m.timestamp
+                }));
+
+                setContacts(prev => {
+                    const next = new Map(prev);
+                    const contact = next.get(jid);
+                    if (contact) {
+                        next.set(jid, { ...contact, data: chartData });
+                    }
+                    return next;
+                });
+                console.log(`[HISTORY] Loaded ${history.length} historical data points for ${jid}`);
+            }
+        } catch (err) {
+            console.error(`[HISTORY] Failed to load historical data for ${jid}:`, err);
+        }
+    }, []);
 
     useEffect(() => {
         function onTrackerUpdate(update: any) {
@@ -131,6 +161,8 @@ export function Dashboard({ connectionState }: DashboardProps) {
                 return next;
             });
             setInputNumber('');
+            // Load historical data for this contact
+            loadHistoricalData(data.jid);
         }
 
         function onContactRemoved(jid: string) {
@@ -150,10 +182,11 @@ export function Dashboard({ connectionState }: DashboardProps) {
             setProbeMethod(method);
         }
 
-        function onTrackedContacts(contacts: { id: string, platform: Platform }[]) {
+        function onTrackedContacts(trackedContacts: { id: string, platform: Platform }[]) {
+            const newContacts: string[] = [];
             setContacts(prev => {
                 const next = new Map(prev);
-                contacts.forEach(({ id, platform }) => {
+                trackedContacts.forEach(({ id, platform }) => {
                     if (!next.has(id)) {
                         // Extract display number from id
                         let displayNumber = id;
@@ -174,10 +207,13 @@ export function Dashboard({ connectionState }: DashboardProps) {
                             profilePic: null,
                             platform
                         });
+                        newContacts.push(id);
                     }
                 });
                 return next;
             });
+            // Load historical data for each new contact
+            newContacts.forEach(jid => loadHistoricalData(jid));
         }
 
         socket.on('tracker-update', onTrackerUpdate);
@@ -202,7 +238,7 @@ export function Dashboard({ connectionState }: DashboardProps) {
             socket.off('probe-method', onProbeMethod);
             socket.off('tracked-contacts', onTrackedContacts);
         };
-    }, []);
+    }, [loadHistoricalData]);
 
     const handleAdd = () => {
         if (!inputNumber) return;
@@ -220,17 +256,17 @@ export function Dashboard({ connectionState }: DashboardProps) {
     return (
         <div className="space-y-6">
             {/* Add Contact Form */}
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+            <div className="bg-dark-900 p-6 rounded-lg shadow-dark border border-dark-700">
                 <div className="flex justify-between items-center mb-4">
                     <div className="flex items-center gap-4">
-                        <h2 className="text-xl font-semibold text-gray-900">Track Contacts</h2>
+                        <h2 className="text-lg font-semibold text-gray-100">Track Contacts</h2>
                         {/* Manage Connections button */}
                         <button
                             onClick={() => setShowConnections(!showConnections)}
-                            className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors flex items-center gap-1 ${
+                            className={`px-3 py-1.5 text-sm rounded transition-all flex items-center gap-1 ${
                                 showConnections
-                                    ? 'bg-gray-700 text-white'
-                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                    ? 'bg-dark-700 text-gray-200'
+                                    : 'bg-dark-800 text-gray-400 hover:bg-dark-700'
                             }`}
                         >
                             <Settings size={14} />
@@ -240,14 +276,14 @@ export function Dashboard({ connectionState }: DashboardProps) {
                     <div className="flex items-center gap-4">
                         {/* Probe Method Toggle */}
                         <div className="flex items-center gap-2">
-                            <span className="text-sm text-gray-600">Probe Method:</span>
-                            <div className="flex rounded-lg overflow-hidden border border-gray-300">
+                            <span className="text-sm text-gray-400">Probe Method:</span>
+                            <div className="flex rounded overflow-hidden border border-dark-700">
                                 <button
                                     onClick={() => handleProbeMethodChange('delete')}
-                                    className={`px-3 py-1.5 text-sm font-medium transition-all duration-200 flex items-center gap-1 ${
+                                    className={`px-3 py-1.5 text-sm transition-all flex items-center gap-1 border-r border-dark-700 ${
                                         probeMethod === 'delete'
-                                            ? 'bg-purple-600 text-white'
-                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            ? 'bg-accent-purple text-white'
+                                            : 'bg-dark-800 text-gray-400 hover:bg-dark-700'
                                     }`}
                                     title="Silent Delete Probe - Completely covert, target sees nothing"
                                 >
@@ -256,10 +292,10 @@ export function Dashboard({ connectionState }: DashboardProps) {
                                 </button>
                                 <button
                                     onClick={() => handleProbeMethodChange('reaction')}
-                                    className={`px-3 py-1.5 text-sm font-medium transition-all duration-200 flex items-center gap-1 ${
+                                    className={`px-3 py-1.5 text-sm transition-all flex items-center gap-1 ${
                                         probeMethod === 'reaction'
-                                            ? 'bg-yellow-500 text-white'
-                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            ? 'bg-accent-yellow text-white'
+                                            : 'bg-dark-800 text-gray-400 hover:bg-dark-700'
                                     }`}
                                     title="Reaction Probe - Sends reactions to non-existent messages"
                                 >
@@ -271,21 +307,21 @@ export function Dashboard({ connectionState }: DashboardProps) {
                         {/* Privacy Mode Toggle */}
                         <button
                             onClick={() => setPrivacyMode(!privacyMode)}
-                            className={`px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-all duration-200 ${
-                                privacyMode 
-                                    ? 'bg-green-600 text-white hover:bg-green-700 shadow-md' 
-                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                            className={`px-4 py-2 rounded flex items-center gap-2 text-sm transition-all ${
+                                privacyMode
+                                    ? 'bg-accent-green text-white'
+                                    : 'bg-dark-800 text-gray-400 hover:bg-dark-700'
                             }`}
                             title={privacyMode ? 'Privacy Mode: ON (Click to disable)' : 'Privacy Mode: OFF (Click to enable)'}
                         >
                             {privacyMode ? (
                                 <>
-                                    <EyeOff size={20} />
+                                    <EyeOff size={18} />
                                     <span>Privacy ON</span>
                                 </>
                             ) : (
                                 <>
-                                    <Eye size={20} />
+                                    <Eye size={18} />
                                     <span>Privacy OFF</span>
                                 </>
                             )}
@@ -294,16 +330,16 @@ export function Dashboard({ connectionState }: DashboardProps) {
                 </div>
                 <div className="flex gap-4">
                     {/* Platform Selector */}
-                    <div className="flex rounded-lg overflow-hidden border border-gray-300">
+                    <div className="flex rounded overflow-hidden border border-dark-700">
                         <button
                             onClick={() => setSelectedPlatform('whatsapp')}
                             disabled={!connectionState.whatsapp}
-                            className={`px-4 py-2 text-sm font-medium transition-all duration-200 flex items-center gap-2 ${
+                            className={`px-4 py-2 text-sm transition-all flex items-center gap-2 border-r border-dark-700 ${
                                 selectedPlatform === 'whatsapp'
-                                    ? 'bg-green-600 text-white'
+                                    ? 'bg-accent-green text-white'
                                     : connectionState.whatsapp
-                                        ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                        ? 'bg-dark-800 text-gray-400 hover:bg-dark-700'
+                                        : 'bg-dark-900 text-gray-600 cursor-not-allowed'
                             }`}
                             title={connectionState.whatsapp ? 'WhatsApp' : 'WhatsApp not connected'}
                         >
@@ -313,12 +349,12 @@ export function Dashboard({ connectionState }: DashboardProps) {
                         <button
                             onClick={() => setSelectedPlatform('signal')}
                             disabled={!connectionState.signal}
-                            className={`px-4 py-2 text-sm font-medium transition-all duration-200 flex items-center gap-2 ${
+                            className={`px-4 py-2 text-sm transition-all flex items-center gap-2 ${
                                 selectedPlatform === 'signal'
-                                    ? 'bg-blue-600 text-white'
+                                    ? 'bg-accent-blue text-white'
                                     : connectionState.signal
-                                        ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                        ? 'bg-dark-800 text-gray-400 hover:bg-dark-700'
+                                        : 'bg-dark-900 text-gray-600 cursor-not-allowed'
                             }`}
                             title={connectionState.signal ? 'Signal' : 'Signal not connected'}
                         >
@@ -329,19 +365,19 @@ export function Dashboard({ connectionState }: DashboardProps) {
                     <input
                         type="text"
                         placeholder="Enter phone number (e.g. 491701234567)"
-                        className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                        className="flex-1 px-4 py-2 bg-dark-950 border border-dark-700 rounded focus:ring-2 focus:ring-accent-blue focus:border-accent-blue outline-none text-gray-200 placeholder-gray-500"
                         value={inputNumber}
                         onChange={(e) => setInputNumber(e.target.value)}
                         onKeyPress={(e) => e.key === 'Enter' && handleAdd()}
                     />
                     <button
                         onClick={handleAdd}
-                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 font-medium transition-colors"
+                        className="px-6 py-2 bg-accent-blue text-white rounded hover:bg-blue-600 flex items-center gap-2 font-medium transition-colors"
                     >
                         <Plus size={20} /> Add Contact
                     </button>
                 </div>
-                {error && <p className="mt-2 text-red-500 text-sm">{error}</p>}
+                {error && <p className="mt-2 text-accent-red text-sm">{error}</p>}
             </div>
 
             {/* Connections Panel */}
@@ -351,9 +387,9 @@ export function Dashboard({ connectionState }: DashboardProps) {
 
             {/* Contact Cards */}
             {contacts.size === 0 ? (
-                <div className="bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl p-12 text-center">
-                    <p className="text-gray-500 text-lg">No contacts being tracked</p>
-                    <p className="text-gray-400 text-sm mt-2">Add a contact above to start tracking</p>
+                <div className="bg-dark-900 border-2 border-dashed border-dark-700 rounded-lg p-12 text-center">
+                    <p className="text-gray-400 text-lg">No contacts being tracked</p>
+                    <p className="text-gray-500 text-sm mt-2">Add a contact above to start tracking</p>
                 </div>
             ) : (
                 <div className="space-y-6">
